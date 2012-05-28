@@ -7,156 +7,123 @@ using EnvDTE80;
 using Microsoft.VisualStudio.Shell.Interop;
 using Microsoft.VisualStudio.Shell;
 
-namespace ToggleXmlComments
-{
-    [PackageRegistration(UseManagedResourcesOnly = true)]
-    [InstalledProductRegistration("#110", "#112", "1.0", IconResourceID = 400)]
-    [ProvideMenuResource("Menus.ctmenu", 1)]
-    [Guid(GuidList.guidVSPackage1PkgString)]
-    public sealed class ToggleXmlCommentsPackage : Package {
-	
-    	private DTE2 _applicationObject;
+namespace ToggleXmlComments {
+	[PackageRegistration(UseManagedResourcesOnly = true)]
+	[InstalledProductRegistration("#110", "#112", "1.0", IconResourceID = 400)]
+	[ProvideMenuResource("Menus.ctmenu", 1)]
+	[Guid(GuidList.guidVSPackage1PkgString)]
+	public sealed class ToggleXmlCommentsPackage : Package {
+		private const string VisualBasic = "{B5E9BD33-6D3E-4B5D-925E-8A43B79820B4}";
+		private const string ToggleExpansionCommand = "Edit.ToggleOutliningExpansion";
 
-        protected override void Initialize()
-        {
-            base.Initialize();
+		private DTE2 applicationObject;
 
-			_applicationObject = (EnvDTE80.DTE2)this.GetService(typeof(SDTE));
-            // Add our command handlers for menu (commands must exist in the .vsct file)
-            OleMenuCommandService mcs = GetService(typeof(IMenuCommandService)) as OleMenuCommandService;
-            if ( null != mcs )
-            {
-                // Create the command for the menu item.
-                CommandID menuCommandID = new CommandID(GuidList.guidVSPackage1CmdSet, (int)PkgCmdIDList.cmdidMyCommand);
-                MenuCommand menuItem = new MenuCommand(MenuItemCallback, menuCommandID );
-                mcs.AddCommand( menuItem );
-            }
-        }
+		protected override void Initialize() {
+			base.Initialize();
 
-        private void MenuItemCallback(object sender, EventArgs e)
-        {
+			applicationObject = (DTE2)GetService(typeof(SDTE));
+
+			// Add our command handlers for menu (commands must exist in the .vsct file)
+			OleMenuCommandService mcs = GetService(typeof(IMenuCommandService)) as OleMenuCommandService;
+			if(null != mcs) {
+				// Create the command for the menu item.
+				CommandID menuCommandID = new CommandID(GuidList.guidVSPackage1CmdSet, (int)PkgCmdIDList.cmdidMyCommand);
+				MenuCommand menuItem = new MenuCommand(MenuItemCallback, menuCommandID);
+				mcs.AddCommand(menuItem);
+			}
+		}
+
+		private void MenuItemCallback(object sender, EventArgs e) {
 			CollapseXmlComments();
-        }
+		}
 
 		private void CollapseXmlComments() {
-			try {
-				_applicationObject.UndoContext.Open("Collapse XML comments");
+			applicationObject.UndoContext.Open("Collapse XML comments");
 
-				foreach(CodeElement2 ce in _applicationObject.ActiveDocument.ProjectItem.FileCodeModel.CodeElements) {
-					CollapseSubmembers(ce, false);
+			try {
+				foreach(CodeElement2 ce in applicationObject.ActiveDocument.ProjectItem.FileCodeModel.CodeElements) {
+					ToggleSubmembers(ce);
 				}
-				_applicationObject.UndoContext.Close();
 			}
-			catch(Exception ex) {
-				_applicationObject.UndoContext.Close();
+			finally {
+				applicationObject.UndoContext.Close();
 			}
 		}
 
-		private void CollapseSubmembers(CodeElement2 ce, bool toggle = true) {
-			EditPoint memberStart;
-			EditPoint commentStart;
-			EditPoint commentEnd;
-			String comChars;
-
-			switch(_applicationObject.ActiveDocument.ProjectItem.FileCodeModel.Language) {
-				case "{B5E9BD33-6D3E-4B5D-925E-8A43B79820B4}": {
-						comChars = "'''";
-						break;
-					}
-				default: {
-						comChars = "///";
-						break;
-					}
-			}
-
+		private void ToggleSubmembers(CodeElement2 codeElement) {
 			try {
-				memberStart = ce.GetStartPoint(vsCMPart.vsCMPartWholeWithAttributes).CreateEditPoint();
-				commentStart = GetCommentStart(memberStart.CreateEditPoint(), comChars);
-				commentEnd = GetCommentEnd(commentStart.CreateEditPoint(), comChars);
-				if(toggle) {
-					((TextSelection)_applicationObject.ActiveDocument.Selection).MoveToPoint(commentStart);
-					_applicationObject.ExecuteCommand("Edit.ToggleOutliningExpansion");
-				}
-				else {
-					commentStart.OutlineSection(commentEnd);
-				}
+				EditPoint memberStart = codeElement.GetStartPoint().CreateEditPoint();
+				ToggleCommentsAboveMember(memberStart, GetCommentString());
 			}
-			catch(Exception) {
-			}
+			catch(Exception) { }
 
-			if(ce.IsCodeType) {
-				foreach(CodeElement2 ce2 in ((CodeType)ce).Members) {
-					CollapseSubmembers(ce2);
-				}
-			}
-			else if(ce.Kind == vsCMElement.vsCMElementNamespace) {
-				foreach(CodeElement2 ce2 in ((CodeNamespace)ce).Members) {
-					CollapseSubmembers(ce2);
+			if(codeElement.IsCodeType || IsNamespace(codeElement)) {
+				dynamic codeOrNamespace = codeElement;
+				foreach(CodeElement2 childCodeElement in codeOrNamespace.Members) {
+					ToggleSubmembers(childCodeElement);
 				}
 			}
 		}
 
-		private EditPoint GetCommentStart(EditPoint ep, string comChars) {
+		private void ToggleCommentsAboveMember(EditPoint editPoint, string commentPrefix) {
 			try {
-				String line;
-				int lastCommentLine = 0;
-				ep.StartOfLine();
-				ep.CharLeft();
-				while(!ep.AtStartOfDocument) {
-					line = ep.GetLines(ep.Line, ep.Line + 1).Trim();
-					if(line.Length == 0 || line.StartsWith(comChars)) {
+				int? firstLineOfComment = null;
+				editPoint.StartOfLine();
+				editPoint.CharLeft();
+				while(!editPoint.AtStartOfDocument) {
+					String line = editPoint.GetLines(editPoint.Line, editPoint.Line + 1).Trim();
+					if(line.Length == 0 || line.StartsWith(commentPrefix)) {
 						if(line.Length > 0) {
-							lastCommentLine = ep.Line;
+							firstLineOfComment = editPoint.Line;
+						} else if(firstLineOfComment.HasValue) {
+							ToggleExpansionAtLine(editPoint.CreateEditPoint(), firstLineOfComment.Value, commentPrefix);
+							firstLineOfComment = null;
 						}
 
-						ep.StartOfLine();
-						ep.CharLeft();
-					}
-					else {
+						editPoint.StartOfLine();
+						editPoint.CharLeft();
+					} else {
 						break;
 					}
+
 				}
 
-				ep.MoveToLineAndOffset(lastCommentLine, 1);
-				while(ep.GetText(comChars.Length) != comChars) {
-					ep.CharRight();
+				if(firstLineOfComment.HasValue) {
+					ToggleExpansionAtLine(editPoint.CreateEditPoint(), firstLineOfComment.Value, commentPrefix);
 				}
 
-				return ep.CreateEditPoint();
 			}
-			catch(Exception) {
-			}
+			catch(Exception) { }
 
-			return null;
 		}
 
-		private EditPoint GetCommentEnd(EditPoint ep, string comChars) {
-			try {
-				String line;
-				EditPoint lastCommentPoint = ep.CreateEditPoint();
-
-				ep.EndOfLine();
-				ep.CharRight();
-				while(!ep.AtEndOfDocument) {
-					line = ep.GetLines(ep.Line, ep.Line + 1).Trim();
-					if(line.StartsWith(comChars)) {
-						lastCommentPoint = ep.CreateEditPoint();
-						ep.EndOfLine();
-						ep.CharRight();
-
-					}
-					else {
-						break;
-					}
-				}
-
-				lastCommentPoint.EndOfLine();
-				return lastCommentPoint;
-			}
-			catch(Exception) {
+		private void ToggleExpansionAtLine(EditPoint commentStartingPoint, int firstLineOfComment, string commentPrefix) {
+			commentStartingPoint.MoveToLineAndOffset(firstLineOfComment, 1);
+			while(commentStartingPoint.GetText(commentPrefix.Length) != commentPrefix) {
+				commentStartingPoint.CharRight();
 			}
 
-			return null;
+			ToggleExpansionAtPoint(commentStartingPoint);
 		}
-    }
+
+		private static bool IsNamespace(CodeElement2 codeElement) {
+			return codeElement.Kind == vsCMElement.vsCMElementNamespace;
+		}
+
+		private void ToggleExpansionAtPoint(EditPoint commentStart) {
+			if(commentStart == null)
+				return;
+
+			((TextSelection)applicationObject.ActiveDocument.Selection).MoveToPoint(commentStart);
+			applicationObject.ExecuteCommand(ToggleExpansionCommand);
+		}
+
+		private string GetCommentString() {
+			if(applicationObject.ActiveDocument.Language == VisualBasic) {
+				return "''";
+			}
+
+			return "//";
+		}
+	}
 }
